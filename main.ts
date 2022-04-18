@@ -1,81 +1,66 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { promisify } from "util";
+import { exec } from "child_process";
 
-// Remember to rename these classes and interfaces!
+const exec_async = promisify(exec);
 
-interface MyPluginSettings {
-	mySetting: string;
+interface GitLightSettings {
+	syncPeriodSeconds: number;
+	vaultRootPath: string;
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+const DEFAULT_SETTINGS: GitLightSettings = {
+	syncPeriodSeconds: 3600,
+	vaultRootPath: ""
 }
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class GitLight extends Plugin {
+	settings: GitLightSettings;
 
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
 		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
+			id: 'gitlight-sync',
+			name: 'Sync',
+			callback: async () => { await this.sync() }
+		});
+
+		this.addSettingTab(new GitLightSettingsTab(this.app, this));
+
+		console.log(`[GitLight] Setting sync to ${this.settings.syncPeriodSeconds} seconds`)
+		if (this.settings.syncPeriodSeconds > 0) {
+			this.registerInterval(window.setInterval(async () => { await this.sync() }, this.settings.syncPeriodSeconds * 1000));
+		}
+		
+		await this.sync()
+	}
+	
+	async sync() {
+		console.log("[GitLight] Starting sync.")
+		const commands = [
+			"git add -A",
+			"git diff-index --quiet HEAD || git commit -m 'GitLight Sync'",
+			"git pull",
+			"git push"
+		]
+		
+		for (const command of commands) {
+			let stdout, stderr: string
+			try {
+				const result = await exec_async(command, { cwd: this.settings.vaultRootPath })
+				stdout = result.stdout
+				stderr = result.stderr
+			} catch (Exception) {
+				new Notice(`[GitLight] Sync failed: Command '${command}' failed.`, 3600 * 24 * 1000)
+				console.log(`[GitLight] Sync failed: Command '${command}' failed.\nstdout: ${stdout}\nstderr: ${stderr}`)
+				return false
 			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
+		}
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+		new Notice("[GitLight] Sync finished successfully.", 5 * 1000)
+		console.log("[GitLight] Sync finished successfully.")
+		return true
 	}
 
 	onunload() {
@@ -91,46 +76,35 @@ export default class MyPlugin extends Plugin {
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+class GitLightSettingsTab extends PluginSettingTab {
+	plugin: GitLight;
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: GitLight) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
 	display(): void {
 		const {containerEl} = this;
-
 		containerEl.empty();
 
-		containerEl.createEl('h2', {text: 'Settings for my awesome plugin.'});
+		new Setting(containerEl)
+			.setName('Synchronization period in seconds')
+			.setDesc("Requires restarting Obsidian. Set to 0 to disable automatic synchronization.")
+			.addText(text => text
+				.setValue(String(this.plugin.settings.syncPeriodSeconds))
+				.onChange(async (value) => {
+					this.plugin.settings.syncPeriodSeconds = Number(value);
+					await this.plugin.saveSettings();
+				}));
 
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
+			.setName('Absolute path to vault root directory.')
+			.setDesc("E.g. '/home/user/obsidian'")
 			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
+				.setValue(this.plugin.settings.vaultRootPath)
 				.onChange(async (value) => {
-					console.log('Secret: ' + value);
-					this.plugin.settings.mySetting = value;
+					this.plugin.settings.vaultRootPath = value;
 					await this.plugin.saveSettings();
 				}));
 	}
